@@ -1,72 +1,116 @@
+# Presentation_Converter.py
 import asyncio
 import os
-import streamlit as st
+import tempfile
 from datetime import datetime
 from typing import Optional
+
+import streamlit as st
 
 # OpenAI 1.x SDK
 from openai import OpenAI
 
-# HTML templating (optional)
+# HTML templating (optional, not required but kept)
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # Playwright for HTML->PDF
 from playwright.async_api import async_playwright
 
-# ---------------------------------------
-# Configuration
-# ---------------------------------------
-st.set_page_config(page_title="HTML → PDF Generator", page_icon="🧾", layout="wide")
+# For safely running async loop inside Streamlit
+try:
+    import nest_asyncio
+    NEST_ASYNCIO_AVAILABLE = True
+except Exception:
+    NEST_ASYNCIO_AVAILABLE = False
 
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
+# ---------------------------------------
+# Streamlit page config
+# ---------------------------------------
+st.set_page_config(page_title="HTML → Presentation PDF Generator", page_icon="🧾", layout="wide")
+st.title("🧾 Generate presentation-style HTML and export to PDF")
+
+# ---------------------------------------
+# OpenAI client
+# ---------------------------------------
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") if hasattr(st, "secrets") else os.environ.get("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    st.warning("Set OPENAI_API_KEY in your environment to enable HTML generation.")
+    st.warning("Set OPENAI_API_KEY in Streamlit secrets or as an environment variable to enable HTML generation.")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-# Optional Jinja2 environment
-env = Environment(
-    loader=FileSystemLoader("."),
-    autoescape=select_autoescape()
-)
+# Optional Jinja2 environment (unused but available)
+env = Environment(loader=FileSystemLoader("."), autoescape=select_autoescape())
 
 # ---------------------------------------
-# Helpers
+# Async Playwright renderer
 # ---------------------------------------
 async def html_to_pdf_playwright(html: str, pdf_path: str, emulate_media: str = "screen"):
     """
     Render HTML to PDF using Playwright/Chromium headless.
     """
+    # Launch browser, set content, and save PDF
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(html, wait_until="load")
         if emulate_media:
             await page.emulate_media(media=emulate_media)
-        # Generate PDF
+        # Generate PDF — rely on Playwright defaults and CSS @page rules from HTML
         await page.pdf(path=pdf_path, format="A4", print_background=True)
         await browser.close()
 
+def render_pdf_sync(html: str, pdf_path: str, emulate_media: str = "screen"):
+    """
+    Run Playwright PDF rendering that cooperates with Streamlit's event loop.
+    """
+    # If nest_asyncio is available, apply it so run_until_complete won't error in an existing loop.
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        if NEST_ASYNCIO_AVAILABLE:
+            nest_asyncio.apply()
+            return loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
+        else:
+            # Fallback: create a new thread-safe loop and run coroutine there
+            # (less ideal in simple environments; recommend installing nest_asyncio)
+            new_loop = asyncio.new_event_loop()
+            try:
+                return new_loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
+            finally:
+                new_loop.close()
+    else:
+        return loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
+
+# ---------------------------------------
+# OpenAI HTML generator (presentation-focused)
+# ---------------------------------------
 def generate_html_with_openai(format_instructions: str, content_instructions: str) -> str:
     """
-    Ask the model to produce valid, self-contained HTML5 (inline CSS where possible).
-    Uses OpenAI 1.x Responses API and returns response.output_text.
+    Ask the model to produce a modern presentation-style single-file HTML suitable for PDF export.
     """
+    if not client:
+        return "<!doctype html><html><head><meta charset='utf-8'><title>Missing API Key</title></head><body><h1>Missing OPENAI_API_KEY</h1><p>Set the key to generate HTML.</p></body></html>"
+
     system_prompt = (
-        "You are an expert HTML designer. Return a COMPLETE, self-contained HTML5 document for every request. Include: <!doctype html>, <html>, <head> with <meta charset='utf-8'> and <meta name='viewport' content='width=device-width, initial-scale=1'>, a meaningful <title>, and a single <style> tag for all CSS. Define CSS variables in :root for --accent and --bg and use var(--accent)/var(--bg) across headings, links, badges, callouts, buttons, and accents. Use only system fonts and inline SVG if needed; do not load external assets (no web fonts, scripts, or remote images). Structure content with semantic HTML, concise paragraphs, and clear sections; prefer lists for dense info. Make it responsive up to ~1200px and visually modern (cards, spacing, contrast). Ensure print/PDF readiness: include @page margins, break-inside: avoid on cards/sections, and @media print rules so it prints cleanly with backgrounds. Return only HTML."
+        "You are an expert HTML/CSS presentation designer. Return a COMPLETE, self-contained HTML5 document "
+        "that looks like a modern business presentation or pitch deck. Use slide-like sections with large, bold "
+        "titles, short bullets, cards for key metrics, and optional charts represented as simple inline SVGs. "
+        "Include: <!doctype html>, <html>, <head> with <meta charset='utf-8'> and <meta name='viewport' content='width=device-width, initial-scale=1'>, "
+        "a meaningful <title>, and a single <style> tag for all CSS. Define CSS variables in :root for --accent, --bg, and --text and use them across headings, links, badges, callouts, and buttons. "
+        "Use only system fonts and inline SVG if needed; do not load external assets. Make it responsive up to ~1200px and visually modern (cards, spacing, subtle shadows). "
+        "Ensure print/PDF readiness: include @page margins, avoid breaks inside cards (break-inside: avoid), and use @media print rules so slides break cleanly between pages. Return only HTML."
     )
+
     user_prompt = f"""
-Desired format/structure:
+Desired presentation layout and format:
 {format_instructions}
 
 Content requirements:
 {content_instructions}
 
 Constraints:
-- Use semantic HTML and minimal, clean CSS.
-- Include a title in <head>.
-- Use system fonts.
-- Ensure printable margins and sensible page breaks for PDF (CSS page breaks).
+- Use semantic HTML and minimal, clean CSS in a single <style> block.
+- Each slide/section should be a distinct block that will print as its own page.
+- Use system fonts only and avoid external scripts/assets.
+- Keep the HTML self-contained.
     """
 
     resp = client.responses.create(
@@ -75,16 +119,15 @@ Constraints:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.3,
+        temperature=0.35,
+        max_output_tokens=3000,
     )
 
-    # Prefer the convenience property if available per docs
-    # Fallback to scanning `output` if necessary.
     text = getattr(resp, "output_text", None)
     if text:
         return text.strip()
 
-    # Fallback: iterate outputs to collect output_text chunks
+    # Fallback parsing
     try:
         parts = []
         for out in getattr(resp, "output", []) or []:
@@ -96,65 +139,90 @@ Constraints:
                 parts.append(getattr(out, "text", ""))
         return "\n".join([p for p in parts if p]).strip()
     except Exception:
-        return ""
+        return "<!doctype html><html><head><meta charset='utf-8'><title>Error</title></head><body><h1>Failed to parse OpenAI response</h1></body></html>"
 
 # ---------------------------------------
 # UI
 # ---------------------------------------
-st.title("🧾 Generate HTML artifacts and export to PDF")
-
 left, right = st.columns([1, 1])
 
 with left:
-    st.subheader("1) Choose a format")
-    default_format = """A one-page report:
-- Header with logo placeholder, report title, and date.
-- Executive summary section.
-- Two-column section for key metrics and bullet insights.
-- Footer with contact info and page number."""
-    format_instructions = st.text_area("Format instructions", value=default_format, height=180)
+    st.subheader("1) Choose a format (presentation style)")
+    default_format = """A 4-slide one-page-per-slide presentation:
+- Title slide: logo placeholder, title, subtitle, date.
+- Executive summary slide: 3 short bullet insights.
+- Metrics slide: two-column cards with KPIs (Visitors, Conversions, Conversion Rate, Top Campaign).
+- Top campaigns slide: bullets + small inline SVG bar to visualize top 3 campaigns.
+Footer: contact details and page number on each slide."""
+    format_instructions = st.text_area("Format instructions", value=default_format, height=200)
 
     st.subheader("2) Describe the content to include")
-    default_content = "Generate a weekly marketing performance report for 'Acme Co' covering website traffic, conversions, and top campaigns for the last 7 days."
-    content_instructions = st.text_area("Content instructions", value=default_content, height=180)
+    default_content = "Generate a weekly marketing performance presentation for 'Acme Co' covering website traffic, conversions, conversion rate, and top campaigns for the last 7 days. Include short action-oriented insights."
+    content_instructions = st.text_area("Content instructions", value=default_content, height=200)
 
     generate_btn = st.button("Generate HTML with OpenAI", type="primary")
 
 with right:
     st.subheader("Preview and Export")
-
     html_state = st.session_state.get("generated_html", "")
 
     if generate_btn:
         if not OPENAI_API_KEY:
             st.error("Missing OPENAI_API_KEY environment variable.")
         else:
-            with st.spinner("Generating HTML..."):
+            with st.spinner("Generating presentation HTML..."):
                 html_state = generate_html_with_openai(format_instructions, content_instructions)
                 st.session_state["generated_html"] = html_state
 
     if html_state:
         st.markdown("Preview (sanitized):")
-
-        # Recent Streamlit versions include st.html; if not available, fall back to components.html.
+        # Attempt to render HTML preview; Streamlit may sanitize some CSS
         try:
-            st.html(html_state, width="stretch")
+            st.html(html_state, width="100%")
         except Exception:
             from streamlit.components.v1 import html as st_html
-            st_html(html_state, height=600, scrolling=True)
+            st_html(html_state, height=700, scrolling=True)
 
         col1, col2 = st.columns(2)
         with col1:
-            file_name = st.text_input("PDF file name", value=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf")
+            suggested_name = f"presentation_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+            file_name = st.text_input("PDF file name", value=suggested_name)
         with col2:
             emulate_media = st.selectbox("PDF CSS media", ["screen", "print"], index=0)
 
         if st.button("Export to PDF (Playwright)"):
-            with st.spinner("Rendering PDF..."):
-                pdf_path = file_name
-                asyncio.run(html_to_pdf_playwright(html_state, pdf_path, emulate_media=emulate_media))
-                with open(pdf_path, "rb") as f:
-                    st.success("PDF generated.")
-                    st.download_button("Download PDF", data=f.read(), file_name=file_name, mime="application/pdf")
+            if not OPENAI_API_KEY:
+                st.error("Cannot export: missing OPENAI_API_KEY (Playwright still runs locally but generation needs API key).")
+            else:
+                with st.spinner("Rendering PDF..."):
+                    # Use a safe temporary file path
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpf:
+                            tmp_path = tmpf.name
+                        # Render
+                        render_pdf_sync(html_state, tmp_path, emulate_media=emulate_media)
+
+                        # Read bytes and offer download
+                        with open(tmp_path, "rb") as f:
+                            pdf_bytes = f.read()
+
+                        st.success("PDF generated.")
+                        st.download_button(
+                            "Download PDF",
+                            data=pdf_bytes,
+                            file_name=file_name,
+                            mime="application/pdf"
+                        )
+                    except Exception as e:
+                        st.error(f"Failed to render PDF: {e}")
+                    finally:
+                        # Attempt cleanup of temp file
+                        try:
+                            if os.path.exists(tmp_path):
+                                os.remove(tmp_path)
+                        except Exception:
+                            pass
     else:
         st.info("Generate HTML to see a preview and export to PDF.")
+
+# End of file
