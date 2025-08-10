@@ -7,7 +7,6 @@ from datetime import datetime
 import streamlit as st
 from openai import OpenAI
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from weasyprint import HTML
 
 # ReportLab imports for PDF creation
 from reportlab.lib.pagesizes import A4
@@ -67,12 +66,6 @@ def create_pdf(title, slides, pdf_path):
         c.showPage()
 
     c.save()
-
-# ---------------------------------------
-# PDF rendering with WeasyPrint
-# ---------------------------------------
-def html_to_pdf_weasyprint(html: str, pdf_path: str):
-    HTML(string=html).write_pdf(pdf_path)
 
 # ---------------------------------------
 # OpenAI HTML generator (presentation-focused)
@@ -174,39 +167,12 @@ with right:
         with col2:
             pass  # No emulate_media for WeasyPrint — it uses print media by default
 
-        # --- Export using WeasyPrint ---
-        if st.button("Export to PDF (WeasyPrint)"):
-            with st.spinner("Rendering PDF..."):
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpf:
-                        tmp_path = tmpf.name
-                    html_to_pdf_weasyprint(html_state, tmp_path)
-
-                    with open(tmp_path, "rb") as f:
-                        pdf_bytes = f.read()
-
-                    st.success("PDF generated.")
-                    st.download_button(
-                        "Download PDF",
-                        data=pdf_bytes,
-                        file_name=file_name,
-                        mime="application/pdf"
-                    )
-                except Exception as e:
-                    st.error(f"Failed to render PDF: {e}")
-                finally:
-                    try:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        pass
-
         # --- Optional: Export using ReportLab from JSON slide data ---
         st.markdown("---")
         st.subheader("Optional: Enter slide data for ReportLab PDF export")
         slide_data_raw = st.text_area(
             "Enter slides as JSON list, e.g.:\n"
-            "[{'title': 'Slide 1', 'bullets': ['Point 1', 'Point 2']}, {'title': 'Slide 2', 'bullets': ['Point A']}]", 
+            '[{"title": "Slide 1", "bullets": ["Point 1", "Point 2"]}, {"title": "Slide 2", "bullets": ["Point A"]}]', 
             height=150
         )
 
