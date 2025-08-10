@@ -60,24 +60,22 @@ async def html_to_pdf_playwright(html: str, pdf_path: str, emulate_media: str = 
 
 def render_pdf_sync(html: str, pdf_path: str, emulate_media: str = "screen"):
     """
-    Run Playwright PDF rendering that cooperates with Streamlit's event loop.
+    Always create a fresh asyncio loop for Playwright to avoid missing-loop errors in Streamlit.
     """
-    # If nest_asyncio is available, apply it so run_until_complete won't error in an existing loop.
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        # No loop in this thread → create one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     if loop.is_running():
-        if NEST_ASYNCIO_AVAILABLE:
-            nest_asyncio.apply()
-            return loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
-        else:
-            # Fallback: create a new thread-safe loop and run coroutine there
-            # (less ideal in simple environments; recommend installing nest_asyncio)
-            new_loop = asyncio.new_event_loop()
-            try:
-                return new_loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
-            finally:
-                new_loop.close()
+        import nest_asyncio
+        nest_asyncio.apply()
+        return loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
     else:
         return loop.run_until_complete(html_to_pdf_playwright(html, pdf_path, emulate_media))
+
 
 # ---------------------------------------
 # OpenAI HTML generator (presentation-focused)
@@ -90,13 +88,17 @@ def generate_html_with_openai(format_instructions: str, content_instructions: st
         return "<!doctype html><html><head><meta charset='utf-8'><title>Missing API Key</title></head><body><h1>Missing OPENAI_API_KEY</h1><p>Set the key to generate HTML.</p></body></html>"
 
     system_prompt = (
-        "You are an expert HTML/CSS presentation designer. Return a COMPLETE, self-contained HTML5 document "
-        "that looks like a modern business presentation or pitch deck. Use slide-like sections with large, bold "
-        "titles, short bullets, cards for key metrics, and optional charts represented as simple inline SVGs. "
-        "Include: <!doctype html>, <html>, <head> with <meta charset='utf-8'> and <meta name='viewport' content='width=device-width, initial-scale=1'>, "
-        "a meaningful <title>, and a single <style> tag for all CSS. Define CSS variables in :root for --accent, --bg, and --text and use them across headings, links, badges, callouts, and buttons. "
-        "Use only system fonts and inline SVG if needed; do not load external assets. Make it responsive up to ~1200px and visually modern (cards, spacing, subtle shadows). "
-        "Ensure print/PDF readiness: include @page margins, avoid breaks inside cards (break-inside: avoid), and use @media print rules so slides break cleanly between pages. Return only HTML."
+       "You are an expert in HTML/CSS presentation design. Return a COMPLETE, self-contained HTML5 document "
+    "that looks like a polished slide deck. Use these style rules:\n"
+    "- First slide: full-screen hero style with large centered title, subtitle, and date.\n"
+    "- Subsequent slides: alternating background colors for contrast.\n"
+    "- Large headings (2.5rem+), bold typography, clean sans-serif system font.\n"
+    "- Generous padding and spacing; centered or grid-based layout.\n"
+    "- Use CSS variables in :root for --accent, --accent2, --bg, --text.\n"
+    "- Cards for key metrics with big numbers and labels.\n"
+    "- Inline SVG icons for sections and metrics (minimal style, no external files).\n"
+    "- Ensure each slide prints on its own PDF page (@page breaks, break-after: page).\n"
+    "Return only HTML, no explanations."
     )
 
     user_prompt = f"""
@@ -226,3 +228,4 @@ with right:
         st.info("Generate HTML to see a preview and export to PDF.")
 
 # End of file
+
