@@ -1,11 +1,19 @@
 import os
 import tempfile
+import textwrap
+import json
 from datetime import datetime
 
 import streamlit as st
 from openai import OpenAI
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from weasyprint import HTML
+
+# ReportLab imports for PDF creation
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
+from reportlab.lib import colors
 
 # ---------------------------------------
 # Streamlit page config
@@ -23,6 +31,42 @@ client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 # Optional Jinja2 environment (unused but kept)
 env = Environment(loader=FileSystemLoader("."), autoescape=select_autoescape())
+
+# ---------------------------------------
+# ReportLab PDF creation function
+# ---------------------------------------
+def create_pdf(title, slides, pdf_path):
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    width, height = A4
+
+    # Title page
+    c.setFont("Helvetica-Bold", 24)
+    c.drawCentredString(width / 2, height - 2 * inch, title)
+    c.setFont("Helvetica", 12)
+    c.drawCentredString(width / 2, height - 2.5 * inch, "Generated Presentation")
+    c.showPage()
+
+    # Slide pages
+    for slide in slides:
+        c.setFont("Helvetica-Bold", 18)
+        c.setFillColor(colors.darkblue)
+        c.drawString(1 * inch, height - 1.2 * inch, slide.get("title", "Untitled Slide"))
+
+        c.setFont("Helvetica", 12)
+        c.setFillColor(colors.black)
+
+        y = height - 1.8 * inch
+        bullets = slide.get("bullets", [])
+        for bullet in bullets:
+            wrapped = textwrap.wrap(f"• {bullet}", width=90)
+            for line in wrapped:
+                c.drawString(1 * inch, y, line)
+                y -= 14
+            y -= 4
+
+        c.showPage()
+
+    c.save()
 
 # ---------------------------------------
 # PDF rendering with WeasyPrint
@@ -130,6 +174,7 @@ with right:
         with col2:
             pass  # No emulate_media for WeasyPrint — it uses print media by default
 
+        # --- Export using WeasyPrint ---
         if st.button("Export to PDF (WeasyPrint)"):
             with st.spinner("Rendering PDF..."):
                 try:
@@ -155,5 +200,50 @@ with right:
                             os.remove(tmp_path)
                     except Exception:
                         pass
+
+        # --- Optional: Export using ReportLab from JSON slide data ---
+        st.markdown("---")
+        st.subheader("Optional: Enter slide data for ReportLab PDF export")
+        slide_data_raw = st.text_area(
+            "Enter slides as JSON list, e.g.:\n"
+            "[{'title': 'Slide 1', 'bullets': ['Point 1', 'Point 2']}, {'title': 'Slide 2', 'bullets': ['Point A']}]", 
+            height=150
+        )
+
+        slides_for_pdf = []
+        if slide_data_raw.strip():
+            try:
+                slides_for_pdf = json.loads(slide_data_raw)
+            except Exception as e:
+                st.error(f"Invalid JSON for slides: {e}")
+
+        if st.button("Export to PDF (ReportLab)"):
+            if not slides_for_pdf:
+                st.error("Please provide slide data in JSON format for ReportLab PDF export.")
+            else:
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmpf:
+                        tmp_path = tmpf.name
+                    create_pdf(file_name.replace(".pdf", ""), slides_for_pdf, tmp_path)
+
+                    with open(tmp_path, "rb") as f:
+                        pdf_bytes = f.read()
+
+                    st.success("PDF generated.")
+                    st.download_button(
+                        "Download PDF",
+                        data=pdf_bytes,
+                        file_name=file_name,
+                        mime="application/pdf"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to render PDF: {e}")
+                finally:
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+
     else:
         st.info("Generate HTML to see a preview and export to PDF.")
